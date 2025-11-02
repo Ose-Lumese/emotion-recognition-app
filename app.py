@@ -8,7 +8,7 @@ from datetime import datetime
 
 # --- Configuration ---
 IMG_WIDTH, IMG_HEIGHT = 48, 48
-MODEL_FILENAME = 'face_emotionModel.h5'
+TFLITE_MODEL_FILENAME = 'face_emotionModel.tflite' # Changed to TFLite model
 DATABASE_FILENAME = 'database.db'
 EMOTION_LABELS = {
     0: 'Angry', 1: 'Disgust', 2: 'Fear', 3: 'Happy',
@@ -18,14 +18,23 @@ EMOTION_LABELS = {
 # --- Initialization ---
 app = Flask(__name__, template_folder='templates') # Explicitly set template folder for clarity
 
-# Load the trained model
+# Load the TFLite model using the Interpreter
 try:
-    # Set compile=False because we only need inference, not training, which speeds up load time
-    emotion_model = tf.keras.models.load_model(MODEL_FILENAME, compile=False)
-    print(f"Successfully loaded model: {MODEL_FILENAME}")
+    # Initialize the TFLite Interpreter
+    interpreter = tf.lite.Interpreter(model_path=TFLITE_MODEL_FILENAME)
+    interpreter.allocate_tensors()
+    print(f"Successfully loaded TFLite model: {TFLITE_MODEL_FILENAME}")
+    
+    # Get tensor details for later use
+    input_details = interpreter.get_input_details()
+    output_details = interpreter.get_output_details()
+
 except Exception as e:
-    print(f"Error loading model: {MODEL_FILENAME}. Ensure the file exists and training is complete. Error: {e}")
-    emotion_model = None
+    print(f"Error loading TFLite model: {TFLITE_MODEL_FILENAME}. Ensure the file exists. Error: {e}")
+    interpreter = None
+    input_details = None
+    output_details = None
+
 
 # --- Database Functions ---
 
@@ -66,11 +75,13 @@ def get_all_results():
     conn.close()
     return results
 
-# --- Prediction Function ---
+# --- Prediction Function (UPDATED FOR TFLite) ---
 
 def predict_emotion(image_path):
-    """Preprocesses an image and uses the loaded model to predict the emotion."""
-    if emotion_model is None:
+    """Preprocesses an image and uses the TFLite interpreter to predict the emotion."""
+    global interpreter, input_details, output_details
+    
+    if interpreter is None:
         return "Model not loaded"
 
     try:
@@ -80,13 +91,23 @@ def predict_emotion(image_path):
         img = img.resize((IMG_WIDTH, IMG_HEIGHT))
         # Convert to numpy array and normalize
         face = np.array(img, 'float32') / 255.0
-        # Reshape for model input: (1, 48, 48, 1)
-        face = face.reshape(1, IMG_WIDTH, IMG_HEIGHT, 1)
+        
+        # Reshape for model input: (1, 48, 48, 1). TFLite expects a float32 tensor.
+        processed_img = face.reshape(1, IMG_WIDTH, IMG_HEIGHT, 1)
 
-        # Make prediction
-        predictions = emotion_model.predict(face)
-        predicted_class = np.argmax(predictions)
+        # 1. Set the input tensor
+        interpreter.set_tensor(input_details[0]['index'], processed_img)
+        
+        # 2. Run inference
+        interpreter.invoke()
+        
+        # 3. Get the results (predictions is a numpy array)
+        predictions = interpreter.get_tensor(output_details[0]['index'])
+        
+        # Determine the predicted class
+        predicted_class = np.argmax(predictions[0])
         predicted_emotion = EMOTION_LABELS.get(predicted_class, "Unknown")
+        
         return predicted_emotion
 
     except Exception as e:
@@ -131,9 +152,9 @@ def index():
 
     # Render template, passing the user details and prediction
     return render_template('index.html', 
-                           prediction=prediction_result, 
-                           user_id=user_id,
-                           full_name=full_name) # Passing full_name for template use
+                            prediction=prediction_result, 
+                            user_id=user_id,
+                            full_name=full_name) # Passing full_name for template use
 
 # --- Main Execution ---
 
